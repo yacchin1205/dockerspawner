@@ -58,8 +58,7 @@ class DockerSpawner(Spawner):
             cls._client = client
         return cls._client
 
-    container_id = Unicode()
-    container_ip = Unicode('127.0.0.1', config=True)
+    service_id = Unicode()
     container_port = Int(8888, min=1, max=65535, config=True)
     container_image = Unicode("jupyterhub/singleuser", config=True)
     container_prefix = Unicode(
@@ -134,7 +133,7 @@ class DockerSpawner(Spawner):
         "  Docker environment variables are always used if defined.")
     tls_config = Dict(config=True,
         help="""Arguments to pass to docker TLS configuration.
-        
+
         See docker.client.TLSConfig constructor for options.
         """
     )
@@ -148,9 +147,7 @@ class DockerSpawner(Spawner):
             change.name, self.__class__.__name__,
         )
 
-    remove_containers = Bool(False, config=True, help="If True, delete containers after they are stopped.")
-    extra_create_kwargs = Dict(config=True, help="Additional args to pass for container create")
-    extra_start_kwargs = Dict(config=True, help="Additional args to pass for container start")
+    extra_create_kwargs = Dict(config=True, help="Additional args to pass for service create")
     extra_host_config = Dict(config=True, help="Additional args to create_host_config for container create")
 
     _container_safe_chars = set(string.ascii_letters + string.digits + '-')
@@ -168,25 +165,6 @@ class DockerSpawner(Spawner):
         )
     )
 
-    use_internal_ip = Bool(False,
-        config=True,
-        help=dedent(
-            """
-            Enable the usage of the internal docker ip. This is useful if you are running
-            jupyterhub (as a container) and the user containers within the same docker network.
-            E.g. by mounting the docker socket of the host into the jupyterhub container.
-            Default is True if using a docker network, False if bridge or host networking is used.
-            """
-        )
-    )
-    @default('use_internal_ip')
-    def _default_use_ip(self):
-        # setting network_name to something other than bridge or host implies use_internal_ip
-        if self.network_name not in {'bridge', 'host'}:
-            return True
-        else:
-            return False
-
     links = Dict(
         config=True,
         help=dedent(
@@ -197,19 +175,6 @@ class DockerSpawner(Spawner):
 
             If the Hub is running in a Docker container,
             this can simplify routing because all traffic will be using docker hostnames.
-            """
-        )
-    )
-
-    network_name = Unicode(
-        "bridge",
-        config=True,
-        help=dedent(
-            """
-            Run the containers on this docker network.
-            If it is an internal docker network, the Hub should be on the same network,
-            as internal docker IP addresses will be used.
-            For bridge networking, external ports will be bound.
             """
         )
     )
@@ -262,17 +227,17 @@ class DockerSpawner(Spawner):
         return self._escaped_name
 
     @property
-    def container_name(self):
+    def service_name(self):
         return "{}-{}".format(self.container_prefix, self.escaped_name)
 
     def load_state(self, state):
         super(DockerSpawner, self).load_state(state)
-        self.container_id = state.get('container_id', '')
+        self.service_id = state.get('service_id', '')
 
     def get_state(self):
         state = super(DockerSpawner, self).get_state()
-        if self.container_id:
-            state['container_id'] = self.container_id
+        if self.service_id:
+            state['service_id'] = self.service_id
         return state
 
     def _public_hub_api_url(self):
@@ -326,49 +291,34 @@ class DockerSpawner(Spawner):
     @gen.coroutine
     def poll(self):
         """Check for my id in `docker ps`"""
-        container = yield self.get_container()
-        if not container:
-            self.log.warn("container not found")
+        service = yield self.get_service()
+        if not service:
+            self.log.warn("service not found")
             return ""
-
-        container_state = container['State']
-        self.log.debug(
-            "Container %s status: %s",
-            self.container_id[:7],
-            pformat(container_state),
-        )
-
-        if container_state["Running"]:
-            return None
-        else:
-            return (
-                "ExitCode={ExitCode}, "
-                "Error='{Error}', "
-                "FinishedAt={FinishedAt}".format(**container_state)
-            )
+        return None
 
     @gen.coroutine
-    def get_container(self):
-        self.log.debug("Getting container '%s'", self.container_name)
+    def get_service(self):
+        self.log.debug("Getting service '%s'", self.service_name)
         try:
-            container = yield self.docker(
-                'inspect_container', self.container_name
+            service = yield self.docker(
+                'inspect_service', self.service_name
             )
-            self.container_id = container['Id']
+            self.service_id = service['ID']
         except APIError as e:
             if e.response.status_code == 404:
-                self.log.info("Container '%s' is gone", self.container_name)
-                container = None
-                # my container is gone, forget my id
-                self.container_id = ''
+                self.log.info("Service '%s' is gone", self.service_name)
+                service = None
+                # my service is gone, forget my id
+                self.service_id = ''
             elif e.response.status_code == 500:
-                self.log.info("Container '%s' is on unhealthy node", self.container_name)
-                container = None
-                # my container is unhealthy, forget my id
-                self.container_id = ''
+                self.log.info("Service '%s' is on unhealthy node", self.service_name)
+                service = None
+                # my service is unhealthy, forget my id
+                self.service_id = ''
             else:
                 raise
-        return container
+        return service
 
     @gen.coroutine
     def start(self, image=None, extra_create_kwargs=None,
@@ -384,79 +334,65 @@ class DockerSpawner(Spawner):
         `extra_host_config` take precedence over their global counterparts.
 
         """
-        container = yield self.get_container()
-        if container is None:
+        service = yield self.get_service()
+        if service is None:
             image = image or self.container_image
 
-            # build the dictionary of keyword arguments for create_container
-            create_kwargs = dict(
-                image=image,
-                environment=self.get_env(),
-                volumes=self.volume_mount_points,
-                name=self.container_name,
+            # build the dictionary of keyword arguments for create_service
+            containerspec_kwargs = dict(
+                Image=image,
+                Env=['{}={}'.format(k, v) for k, v in self.get_env().items()],
+                Mounts=self.volume_mount_points
             )
-            create_kwargs.update(self.extra_create_kwargs)
+            containerspec_kwargs.update(self.extra_create_kwargs)
             if extra_create_kwargs:
-                create_kwargs.update(extra_create_kwargs)
-            if image.startswith('jupyter/') and 'command' not in create_kwargs:
+                containerspec_kwargs.update(extra_create_kwargs)
+            if image.startswith('jupyter/') and 'Command' not in create_kwargs:
                 # jupyter/docker-stacks launch with /usr/local/bin/start-singleuser.sh
                 # use this as default if any jupyter/ image is being used.
-                create_kwargs['command'] = '/usr/local/bin/start-singleuser.sh'
+                containerspec_kwargs['Command'] = '/usr/local/bin/start-singleuser.sh'
 
-            # build the dictionary of keyword arguments for host_config
-            host_config = dict(binds=self.volume_binds, links=self.links)
+            # TODO: Import volume_binds and links to args for create_service
+            self.log.info('volume_binds={}, links={}'.format(self.volume_binds,
+                                                             self.links))
+            endpointspec = {'Ports': [{'TargetPort': self.container_port}]}
 
+            resources = {}
             if hasattr(self, 'mem_limit') and self.mem_limit is not None:
-                # If jupyterhub version > 0.7, mem_limit is a traitlet that can
-                # be directly configured. If so, use it to set mem_limit.
-                # this will still be overriden by extra_host_config
-                host_config['mem_limit'] = self.mem_limit
+                resources['Limits'] = {'MemoryBytes': self.mem_limit}
 
-            if not self.use_internal_ip:
-                host_config['port_bindings'] = {self.container_port: (self.container_ip,)}
-            host_config.update(self.extra_host_config)
-            host_config.setdefault('network_mode', self.network_name)
+            endpointspec.update(self.extra_host_config)
 
             if extra_host_config:
-                host_config.update(extra_host_config)
+                endpointspec.update(extra_host_config)
 
-            self.log.debug("Starting host with config: %s", host_config)
+            create_kwargs = dict(
+                name=self.service_name,
+                task_template={'ContainerSpec': containerspec_kwargs,
+                               'Resources': resources},
+                endpoint_spec=endpointspec
+            )
 
-            host_config = self.client.create_host_config(**host_config)
-            create_kwargs.setdefault('host_config', {}).update(host_config)
+            self.log.info("Starting host with config: %s", repr(create_kwargs))
 
-            # create the container
-            resp = yield self.docker('create_container', **create_kwargs)
-            self.container_id = resp['Id']
+            # create the service
+            resp = yield self.docker('create_service', **create_kwargs)
+            self.service_id = resp['ID']
             self.log.info(
-                "Created container '%s' (id: %s) from image %s",
-                self.container_name, self.container_id[:7], image)
+                "Created service '%s' (id: %s) from image %s",
+                self.service_name, self.service_id[:7], image)
 
         else:
             self.log.info(
-                "Found existing container '%s' (id: %s)",
-                self.container_name, self.container_id[:7])
+                "Found existing service '%s' (id: %s)",
+                self.service_name, self.service_id[:7])
             # Handle re-using API token.
             # Get the API token from the environment variables
-            # of the running container:
-            for line in container['Config']['Env']:
+            # of the running service:
+            for line in service['Spec']['TaskTemplate']['ContainerSpec']['Env']:
                 if line.startswith('JPY_API_TOKEN='):
                     self.api_token = line.split('=', 1)[1]
                     break
-
-        # TODO: handle unpause
-        self.log.info(
-            "Starting container '%s' (id: %s)",
-            self.container_name, self.container_id[:7])
-
-        # build the dictionary of keyword arguments for start
-        start_kwargs = {}
-        start_kwargs.update(self.extra_start_kwargs)
-        if extra_start_kwargs:
-            start_kwargs.update(extra_start_kwargs)
-
-        # start the container
-        yield self.docker('start', self.container_id, **start_kwargs)
 
         ip, port = yield self.get_ip_and_port()
         # store on user for pre-jupyterhub-0.7:
@@ -468,68 +404,33 @@ class DockerSpawner(Spawner):
     @gen.coroutine
     def get_ip_and_port(self):
         """Queries Docker daemon for container's IP and port.
-
-        If you are using network_mode=host, you will need to override
-        this method as follows::
-
-            @gen.coroutine
-            def get_ip_and_port(self):
-                return self.container_ip, self.container_port
-
-        You will need to make sure container_ip and container_port
-        are correct, which depends on the route to the container
-        and the port it opens.
         """
-        if self.use_internal_ip:
-            resp = yield self.docker('inspect_container', self.container_id)
-            network_settings = resp['NetworkSettings']
-            if 'Networks' in network_settings:
-                ip = self.get_network_ip(network_settings)
-            else:  # Fallback for old versions of docker (<1.9) without network management
-                ip = network_settings['IPAddress']
-            port = self.container_port
-        else:
-            resp = yield self.docker('port', self.container_id, self.container_port)
-            if resp is None:
-                raise RuntimeError("Failed to get port info for %s" % self.container_id)
-            ip = resp[0]['HostIp']
-            port = resp[0]['HostPort']
+        retries = 3
+        while retries > 0:
+            resp = yield self.docker('inspect_service', self.service_id)
+            endpoint = resp['Endpoint']
+            if 'Ports' in endpoint:
+                break
+            self.log.info('The published ports are not assigned... Waiting 3 secs')
+            yield gen.sleep(3)
+            retries -= 1
+        self.log.info('Endpoint: Ports=%s', endpoint['Ports'])
+        # JupyterHub connects to the container via routing mesh
+        ip = '127.0.0.1'
+        port = endpoint['Ports'][0]['PublishedPort']
         return ip, port
-
-    def get_network_ip(self, network_settings):
-        networks = network_settings['Networks']
-        if self.network_name not in networks:
-            raise Exception(
-                "Unknown docker network '{network}'."
-                " Did you create it with `docker network create <name>`?".format(
-                    network=self.network_name
-                )
-            )
-        network = networks[self.network_name]
-        ip = network['IPAddress']
-        return ip
 
     @gen.coroutine
     def stop(self, now=False):
-        """Stop the container
+        """Remove the service
 
         Consider using pause/unpause when docker-py adds support
         """
         self.log.info(
-            "Stopping container %s (id: %s)",
-            self.container_name, self.container_id[:7])
-        yield self.docker('stop', self.container_id)
-
-        if self.remove_containers:
-            self.log.info(
-                "Removing container %s (id: %s)",
-                self.container_name, self.container_id[:7])
-            # remove the container, as well as any associated volumes
-            yield self.docker('remove_container', self.container_id, v=True)
-
-        # indicate that we will resume,
-        # so JupyterHub >= 0.7.1 won't cleanup our API token
-        self.will_resume = (not self.remove_containers)
+            "Removing service %s (id: %s)",
+            self.service_name, self.service_id[:7])
+        yield self.docker('remove_service', self.service_id)
+        self.will_resume = False
 
         self.clear_state()
 
@@ -551,5 +452,3 @@ class DockerSpawner(Spawner):
                 v = v['bind']
             binds[_fmt(k)] = {'bind': _fmt(v), 'mode': m}
         return binds
-
-
