@@ -339,10 +339,15 @@ class DockerSpawner(Spawner):
             image = image or self.container_image
 
             # build the dictionary of keyword arguments for create_service
+            mounts = [{'Source': host_dir,
+                       'Target': container['bind'],
+                       'Type': 'bind',
+                       'ReadOnly': container['ro']} \
+                       for host_dir, container in self.volume_binds.items()]
             containerspec_kwargs = dict(
                 Image=image,
                 Env=['{}={}'.format(k, v) for k, v in self.get_env().items()],
-                Mounts=self.volume_mount_points
+                Mounts=mounts
             )
             containerspec_kwargs.update(self.extra_create_kwargs)
             if extra_create_kwargs:
