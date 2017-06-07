@@ -93,7 +93,7 @@ class SystemUserSpawner(DockerSpawner):
         volumes = super(SystemUserSpawner, self).volume_binds
         volumes[self.host_homedir] = {
             'bind': self.homedir,
-            'ro': False
+            'ro': True
         }
         return volumes
 
