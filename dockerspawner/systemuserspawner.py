@@ -51,6 +51,8 @@ class SystemUserSpawner(DockerSpawner):
         )
     )
 
+    mem_limit = 1024 * 1024 * 1024
+
     @property
     def host_homedir(self):
         """
