@@ -100,16 +100,16 @@ class SystemUserSpawner(DockerSpawner):
     def get_env(self):
         env = super(SystemUserSpawner, self).get_env()
         env.update(dict(
-            USER=self.user.name,
-            USER_ID=self.user_id,
-            HOME=self.homedir
+            HOST_USER=self.user.name,
+            HOST_USER_ID=self.user_id,
+            HOST_HOME=self.homedir
         ))
         return env
-    
+
     def _user_id_default(self):
         """
         Get user_id from pwd lookup by name
-        
+
         If the authenticator stores user_id in the user state dict,
         this will never be called, which is necessary if
         the system users are not on the Hub system (i.e. Hub itself is in a container).
