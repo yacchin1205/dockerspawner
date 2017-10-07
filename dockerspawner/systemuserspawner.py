@@ -10,8 +10,6 @@ from traitlets import (
 
 class SystemUserSpawner(DockerSpawner):
 
-    container_image = Unicode("jupyterhub/systemuser", config=True)
-
     host_homedir_format_string = Unicode(
         "/home/{username}",
         config=True,
@@ -50,6 +48,8 @@ class SystemUserSpawner(DockerSpawner):
             """
         )
     )
+
+    mem_limit = 1024 * 1024 * 1024
 
     @property
     def host_homedir(self):
@@ -93,23 +93,26 @@ class SystemUserSpawner(DockerSpawner):
         volumes = super(SystemUserSpawner, self).volume_binds
         volumes[self.host_homedir] = {
             'bind': self.homedir,
-            'ro': False
+            'ro': True
         }
         return volumes
 
     def get_env(self):
         env = super(SystemUserSpawner, self).get_env()
+        # relies on NB_USER and NB_UID handling in jupyter/docker-stacks
         env.update(dict(
-            USER=self.user.name,
-            USER_ID=self.user_id,
-            HOME=self.homedir
+            USER=self.user.name, # deprecated
+            NB_USER=self.user.name,
+            USER_ID=self.user_id, # deprecated
+            NB_UID=self.user_id,
+            HOME=self.homedir,
         ))
         return env
-    
+
     def _user_id_default(self):
         """
         Get user_id from pwd lookup by name
-        
+
         If the authenticator stores user_id in the user state dict,
         this will never be called, which is necessary if
         the system users are not on the Hub system (i.e. Hub itself is in a container).
@@ -133,8 +136,10 @@ class SystemUserSpawner(DockerSpawner):
         if extra_create_kwargs is None:
             extra_create_kwargs = {}
 
-        if 'working_dir' not in extra_create_kwargs:
-            extra_create_kwargs['working_dir'] = self.homedir
+        extra_create_kwargs.setdefault('working_dir', self.homedir)
+        # systemuser image must be started as root
+        # relies on NB_UID and NB_USER handling in docker-stacks
+        extra_create_kwargs.setdefault('user', '0')
 
         return super(SystemUserSpawner, self).start(
             image=image,
