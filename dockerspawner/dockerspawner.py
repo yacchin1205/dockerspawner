@@ -352,10 +352,11 @@ class DockerSpawner(Spawner):
             containerspec_kwargs.update(self.extra_create_kwargs)
             if extra_create_kwargs:
                 containerspec_kwargs.update(extra_create_kwargs)
-            if image.startswith('jupyter/') and 'Command' not in create_kwargs:
+            if image.startswith('jupyter/') and (extra_create_kwargs is None or \
+               'Command' not in extra_create_kwargs):
                 # jupyter/docker-stacks launch with /usr/local/bin/start-singleuser.sh
                 # use this as default if any jupyter/ image is being used.
-                containerspec_kwargs['Command'] = '/usr/local/bin/start-singleuser.sh'
+                containerspec_kwargs['Command'] = ['/usr/local/bin/start-singleuser.sh']
 
             # TODO: Import volume_binds and links to args for create_service
             self.log.info('volume_binds={}, links={}'.format(self.volume_binds,
