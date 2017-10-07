@@ -49,8 +49,6 @@ class SystemUserSpawner(DockerSpawner):
         )
     )
 
-    mem_limit = 1024 * 1024 * 1024
-
     @property
     def host_homedir(self):
         """
@@ -93,7 +91,7 @@ class SystemUserSpawner(DockerSpawner):
         volumes = super(SystemUserSpawner, self).volume_binds
         volumes[self.host_homedir] = {
             'bind': self.homedir,
-            'ro': True
+            'ro': False
         }
         return volumes
 
