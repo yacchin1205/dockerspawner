@@ -98,14 +98,12 @@ class SwarmSpawner(DockerSpawner):
     @property
     def mounts(self):
         if len(self.volume_binds):
-            driver = self.mount_driver_config
             return [
                 Mount(
                     target=vol["bind"],
                     source=host_loc,
                     type="bind",
                     read_only=vol["mode"] == "ro",
-                    driver_config=driver,
                 )
                 for host_loc, vol in self.volume_binds.items()
             ]
